@@ -1,3 +1,5 @@
+> **Not part of Ghost.** This is a copy of CopilotKit's OpenBot, a company AI assistant that runs on your own infrastructure, kept for reference. It is not installed on a Ghost box.
+
 <div align="center">
 
 # OpenBot
