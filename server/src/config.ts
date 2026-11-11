@@ -9,11 +9,34 @@ import { organizationAuthority } from "./auth/organization";
 import type { ActionPolicy } from "./computer/policy";
 import { parseActionPolicy } from "./computer/policy-store";
 
-export type RuntimeCapabilities = {
-  mode: "intelligence";
-  durableHistory: true;
-  intelligence: IntelligenceSettings;
-};
+/**
+ * How this deployment stores threads and memory.
+ *
+ * Upstream has one mode and refuses to start without CopilotKit's hosted
+ * Intelligence. Their own .env.example says running Intelligence yourself is an
+ * Enterprise feature and not self-serve, which makes a fork that keeps this
+ * requirement a fork that still depends on their servers.
+ *
+ * So there is a second mode. `local` keeps threads and messages in the
+ * PostgreSQL this deployment already runs, and hands the runtime no
+ * intelligence client at all — which matters because the runtime infers its
+ * mode from whether one is present (see copilot.ts, where the client used to
+ * be passed). Their runtime supports going without; OpenBot simply never did.
+ *
+ * `intelligence` is left intact for anyone who wants the hosted service.
+ * Nothing is removed, only made optional.
+ */
+export type RuntimeCapabilities =
+  | {
+      mode: "intelligence";
+      durableHistory: true;
+      intelligence: IntelligenceSettings;
+    }
+  | {
+      mode: "local";
+      durableHistory: true;
+      intelligence?: undefined;
+    };
 
 /**
  * The Intelligence contract. Three values are required; see runtimeCapabilities.
@@ -884,9 +907,20 @@ function runtimeCapabilities(environment: Environment): RuntimeCapabilities {
     .filter(([, value]) => !value)
     .map(([name]) => name);
 
+  // Nothing configured is not a mistake to refuse — it is a deployment that
+  // keeps its own threads. Upstream threw here; that throw is the only thing
+  // that made the hosted service mandatory.
+  if (missing.length === 3) {
+    return { mode: "local", durableHistory: true };
+  }
+
+  // Half-configured IS a mistake, and a loud one. Somebody meant to use the
+  // hosted service and mistyped a variable; falling back to local storage
+  // silently would look like it worked and quietly split their history in two.
   if (missing.length > 0) {
     throw new Error(
-      `CopilotKit Intelligence is required and is not configured. Missing: ${missing.join(", ")}`,
+      `CopilotKit Intelligence is partly configured. Missing: ${missing.join(", ")}. ` +
+        `Set all three to use the hosted service, or none to keep threads in this deployment's own database.`,
     );
   }
 
