@@ -1,3 +1,13 @@
+> **CultureReset fork of [CopilotKit/OpenBot](https://github.com/CopilotKit/OpenBot).** Open-source AI coworkers that each get their own browser, files and tools, with every action decided before it happens and recorded after.
+>
+> - **Why it is here:** saved to study how OpenBot gives each agent its own computer and gates its actions, for the design of NODE's agents.
+> - **Does anything run from it:** no. `main` is upstream as of release v0.0.15; the `backup/local-20261111` branch holds local configuration experiments saved on November 11, 2026.
+> - **License:** MIT, from upstream. Report issues and get updates [upstream](https://github.com/CopilotKit/OpenBot).
+>
+> Upstream's README follows unchanged.
+
+---
+
 <div align="center">
 
 # OpenBot
