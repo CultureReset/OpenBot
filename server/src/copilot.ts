@@ -34,6 +34,8 @@ import type { DeploymentConfig } from "./config";
 import { observeModelConnection } from "./desktop-connection-failure";
 import { desktopTelemetryProperties } from "./desktop-telemetry";
 import { observeIntelligenceAuthentication } from "./intelligence-client";
+import { LocalThreadLock } from "./local-thread-lock";
+import { LocalTranscript } from "./local-transcript";
 import type { SelectableSkill, Selection } from "./plugins/selection";
 import {
   latestUserText,
@@ -2118,14 +2120,32 @@ export function mountCopilotRuntime(
   /*
    * One client, used by the runtime and by anything reading a thread beside it, so a hop reads the
    * history a person's run would read rather than a second view of it that could disagree.
+   *
+   * Null in local mode. Everything below that used to assume a client now asks
+   * first, and the runtime is handed no `intelligence` at all — which is how it
+   * is told to run locally, since it infers its mode from whether one is there.
    */
-  const intelligenceClient = observeIntelligenceAuthentication(
-    new IntelligenceKnowingANewThread({
-      apiUrl: intelligence.apiUrl,
-      wsUrl: intelligence.gatewayWsUrl,
-      apiKey: intelligence.apiKey,
-    }),
-  );
+  /**
+   * The run lock when there is no platform to issue one.
+   *
+   * Built unconditionally and unused in hosted mode, because one line that is
+   * sometimes a lock and sometimes nothing is how a conversation ends up with
+   * two runs in it.
+   */
+  const localThreadLock = new LocalThreadLock(THREAD_LOCK_TTL_SECONDS * 1000);
+
+  /** Threads and history when there is no platform holding them. See local-transcript.ts. */
+  const localTranscript = new LocalTranscript();
+
+  const intelligenceClient = intelligence
+    ? observeIntelligenceAuthentication(
+        new IntelligenceKnowingANewThread({
+          apiUrl: intelligence.apiUrl,
+          wsUrl: intelligence.gatewayWsUrl,
+          apiKey: intelligence.apiKey,
+        }),
+      )
+    : null;
 
   const runtime = new CopilotRuntime({
     // `mode` is inferred from the presence of `intelligence`; passing it is a type error.
@@ -2136,8 +2156,12 @@ export function mountCopilotRuntime(
     identifyUser,
     // The subclass, not the base: a thread nobody has run yet reads as empty rather than as a 500.
     // See IntelligenceKnowingANewThread.
-    intelligence: intelligenceClient,
-    licenseToken: intelligence.licenseToken,
+    //
+    // OMITTED ENTIRELY in local mode, not passed as null. The runtime picks its
+    // mode from whether this key is present, so spreading it in conditionally is
+    // the switch — an explicit undefined would still count as present.
+    ...(intelligenceClient ? { intelligence: intelligenceClient } : {}),
+    ...(intelligence?.licenseToken ? { licenseToken: intelligence.licenseToken } : {}),
     // Carried on the events the runtime already sends, so OpenBot's traffic is separable from any
     // other deployment's. Adds no events of its own.
     telemetryProperties: {
@@ -2201,11 +2225,19 @@ export function mountCopilotRuntime(
      * refused with `active_lock_mismatch`: a thread's active run is a lock the platform issues, and
      * the token that holds it is not the API key. The runtime asks the client for both, so anything
      * else driving a run has to ask the same client the same way.
+     *
+     * OMITTED in local mode. There is no remote runner to join — the turn runs
+     * in this process — so offering a connection to one would be describing a
+     * socket that does not exist.
      */
-    runnerConnection: () => ({
-      url: intelligenceClient.ɵgetRunnerWsUrl(),
-      authToken: intelligenceClient.ɵgetRunnerAuthToken(),
-    }),
+    ...(intelligenceClient
+      ? {
+          runnerConnection: () => ({
+            url: intelligenceClient.ɵgetRunnerWsUrl(),
+            authToken: intelligenceClient.ɵgetRunnerAuthToken(),
+          }),
+        }
+      : {}),
     /**
      * The conversation's run lock, as the platform issues it.
      *
@@ -2225,7 +2257,12 @@ export function mountCopilotRuntime(
         agentId: string;
       }) => {
         try {
-          const held = await intelligenceClient.ɵacquireThreadLock(input);
+          const held = intelligenceClient
+            ? await intelligenceClient.ɵacquireThreadLock(input)
+            : await localThreadLock.acquire(input);
+          // Local mode returns null for contention rather than throwing a 409,
+          // so the conflict is handled here instead of in the catch below.
+          if (!held) return null;
           // A run started on this thread. Side effect only, never awaited: a channel showing it is
           // working is worth nothing next to the lock the run depends on.
           try {
@@ -2261,10 +2298,14 @@ export function mountCopilotRuntime(
         }
       },
       renew: async (input: { threadId: string; runId: string }) => {
-        await intelligenceClient.ɵrenewThreadLock({
-          ...input,
-          ttlSeconds: THREAD_LOCK_TTL_SECONDS,
-        });
+        if (intelligenceClient) {
+          await intelligenceClient.ɵrenewThreadLock({
+            ...input,
+            ttlSeconds: THREAD_LOCK_TTL_SECONDS,
+          });
+        } else {
+          await localThreadLock.renew(input);
+        }
       },
       release: async (input: { threadId: string; runId: string }) => {
         // The run on this thread is over. Cleared here rather than trusting a browser: the run may
@@ -2272,7 +2313,11 @@ export function mountCopilotRuntime(
         try {
           onRunBusy?.({ threadId: input.threadId, busy: false });
         } catch {}
-        await intelligenceClient.ɵcleanupThreadLock(input);
+        if (intelligenceClient) {
+          await intelligenceClient.ɵcleanupThreadLock(input);
+        } else {
+          await localThreadLock.release(input);
+        }
       },
     },
     agentFor,
@@ -2293,10 +2338,15 @@ export function mountCopilotRuntime(
       >;
       const read = await historyOrEmpty<Read>(
         () =>
-          intelligenceClient.getThreadMessages({
-            threadId: input.threadId,
-            userId: input.actorId,
-          }),
+          intelligenceClient
+            ? intelligenceClient.getThreadMessages({
+                threadId: input.threadId,
+                userId: input.actorId,
+              })
+            : (localTranscript.getThreadMessages({
+                threadId: input.threadId,
+                userId: input.actorId,
+              }) as Promise<Read>),
         { messages: [] } as Read,
       );
       return read.messages;
